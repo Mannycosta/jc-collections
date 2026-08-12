@@ -163,6 +163,13 @@ footer{color:var(--muted);font-size:12.5px;text-align:center}
     <h2 id="dTitle">Broker</h2>
     <p class="hint" id="dSub"></p>
   </div>
+  <div class="row" style="justify-content:space-between">
+    <span class="hint" id="dCount"></span>
+    <span class="row" style="gap:6px">
+      <button type="button" class="btn quiet" id="dOne" style="padding:5px 12px;min-height:0;font-size:13px">Oldest only</button>
+      <button type="button" class="btn quiet" id="dAll" style="padding:5px 12px;min-height:0;font-size:13px">All loads</button>
+    </span>
+  </div>
   <div class="loads" id="dLoads"></div>
   <div>
     <label for="dTo">Send to</label>
@@ -597,36 +604,78 @@ function render() {
 
 /* -------------------------------------------------------------- dialog -- */
 var CUR = null;
+
+function selectedLoads() {
+  if (!CUR) return [];
+  return CUR.loads.filter(function (l) { return CUR.selected[l.load_number]; });
+}
+
+function refreshEmail() {
+  var sel = selectedLoads();
+  var n = CUR.loads.length;
+  $('#dCount').textContent = sel.length + ' of ' + n + ' selected';
+  $('#dSend').disabled = !sel.length;
+  if (!sel.length) { $('#dBody').value = ''; CUR.subject = ''; return; }
+  var mail = buildEmail(CUR.name, sel);
+  CUR.subject = mail.subject;
+  $('#dBody').value = mail.body;
+}
+
+function paintLoads() {
+  $('#dLoads').innerHTML = '<table>' + CUR.loads.map(function (l) {
+    var on = CUR.selected[l.load_number] ? ' checked' : '';
+    return '<tr><td style="width:34px"><input type="checkbox" data-pick="' + esc(l.load_number) + '"' + on +
+      ' style="width:18px;height:18px;min-height:0"></td>' +
+      '<td class="mono">#' + esc(l.load_number) + '</td>' +
+      '<td class="num">$' + money(+l.amount || 0) + '</td>' +
+      '<td class="num">' + ageOf(l.funded_date) + 'd</td>' +
+      '<td class="num"><button type="button" class="btn quiet" style="padding:3px 9px;min-height:0;font-size:12px" ' +
+      'data-paid="' + esc(l.load_number) + '">Paid</button></td></tr>';
+  }).join('') + '</table>';
+  Array.prototype.forEach.call($('#dLoads').querySelectorAll('[data-pick]'), function (c) {
+    c.addEventListener('change', function () {
+      CUR.selected[c.getAttribute('data-pick')] = c.checked;
+      refreshEmail();
+    });
+  });
+  Array.prototype.forEach.call($('#dLoads').querySelectorAll('[data-paid]'), function (b) {
+    b.addEventListener('click', function () { markPaid(CUR.name, b.getAttribute('data-paid')); });
+  });
+}
+
 function openDialog(name) {
   var g = groupDue(null).filter(function (x) { return x.name === name; })[0];
   if (!g) return;
   var due = g.loads.filter(function (l) { return ageOf(l.funded_date) >= DUE_DAYS; });
   if (!due.length) due = g.loads;
-  CUR = { name: name, loads: due };
-  var mail = buildEmail(name, due);
+  // oldest first, and only the oldest is chased unless she says otherwise
+  due = due.slice().sort(function (a, b) { return ageOf(b.funded_date) - ageOf(a.funded_date); });
+  CUR = { name: name, loads: due, selected: {} };
+  CUR.selected[due[0].load_number] = true;
+
   $('#dTitle').textContent = name;
   var since = daysSince(lastContact(name));
-  $('#dSub').textContent = due.length + ' load' + (due.length > 1 ? 's' : '') + ' · $' + money(
+  $('#dSub').textContent = due.length + ' load' + (due.length > 1 ? 's' : '') + ' open · $' + money(
     due.reduce(function (a, l) { return a + (+l.amount || 0); }, 0)) +
     (since != null ? ' · last emailed ' + (since === 0 ? 'today' : since + ' days ago') : ' · never emailed');
-  $('#dLoads').innerHTML = '<table>' + due.map(function (l) {
-    return '<tr><td class="mono">#' + esc(l.load_number) + '</td><td class="num">$' + money(+l.amount || 0) +
-      '</td><td class="num">' + ageOf(l.funded_date) + 'd</td>' +
-      '<td class="num"><button type="button" class="btn quiet" style="padding:3px 9px;min-height:0;font-size:12px" ' +
-      'data-paid="' + esc(l.load_number) + '">Paid</button></td></tr>';
-  }).join('') + '</table>';
-  Array.prototype.forEach.call($('#dLoads').querySelectorAll('[data-paid]'), function (b) {
-    b.addEventListener('click', function () { markPaid(name, b.getAttribute('data-paid')); });
-  });
+  paintLoads();
   var known = (S.brokers[name] || {}).emails || [];
   $('#dTo').value = known[0] || '';
   $('#dKnown').textContent = known.length ? 'Saved: ' + known.join(', ')
-                                          : 'No address saved yet — type it once and it’s remembered.';
-  $('#dBody').value = mail.body;
-  CUR.subject = mail.subject;
+                                          : 'No address saved yet — type it once and it\u2019s remembered.';
   $('#dMsg').innerHTML = '';
+  refreshEmail();
   $('#dlg').showModal();
 }
+
+$('#dAll').addEventListener('click', function () {
+  CUR.loads.forEach(function (l) { CUR.selected[l.load_number] = true; });
+  paintLoads(); refreshEmail();
+});
+$('#dOne').addEventListener('click', function () {
+  CUR.selected = {}; CUR.selected[CUR.loads[0].load_number] = true;
+  paintLoads(); refreshEmail();
+});
 
 function markPaid(broker, load) {
   db('loads?load_number=eq.' + encodeURIComponent(load) + '&broker_name=eq.' + encodeURIComponent(broker),
@@ -643,6 +692,8 @@ $('#dCopy').addEventListener('click', function () {
 });
 $('#dSend').addEventListener('click', function () {
   if (!CUR) return;
+  var picked = selectedLoads();
+  if (!picked.length) return;
   var to = $('#dTo').value.trim(), body = $('#dBody').value;
   var url = 'https://mail.google.com/mail/?view=cm&fs=1' +
     '&to=' + encodeURIComponent(to) +
@@ -657,7 +708,7 @@ $('#dSend').addEventListener('click', function () {
   }
   window.open(url, '_blank', 'noopener');
   var jobs = [db('outreach', { method: 'POST', prefer: 'return=minimal', body: {
-    broker_name: CUR.name, load_numbers: CUR.loads.map(function (l) { return l.load_number; }),
+    broker_name: CUR.name, load_numbers: picked.map(function (l) { return l.load_number; }),
     to_email: to || null, subject: CUR.subject, body: body } })];
   if (to) {
     var known = (S.brokers[CUR.name] || {}).emails || [];
